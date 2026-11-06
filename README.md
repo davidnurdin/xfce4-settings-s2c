@@ -8,29 +8,34 @@ L'interface reste **celle d'origine** ; le patch ne fait que deux ajouts :
 
 1. **Aperçu de la disposition** : les écrans virtuels sont dessinés en pointillés, avec leur nom
    (`eDP.1`, `eDP.2`…), à l'intérieur de l'écran physique qui les porte.
-2. **Une ligne « Écrans virtuels : [colonnes] × [lignes] [Découper] [Fusionner] »** dans l'onglet Général,
-   pour l'écran sélectionné. Elle appelle `screen2cut --grid` / `--ungrid`, qui enregistre le découpage
-   (`~/.config/screen2cut/config.json`) et le réapplique à l'ouverture de session.
+2. **Une ligne « Écrans virtuels : [colonnes] × [lignes] [Découper] [Fusionner] [Éditer…] »** dans l'onglet
+   Général, pour l'écran sélectionné. Elle appelle `screen2cut --grid` / `--ungrid`, qui enregistre le
+   découpage (`~/.config/screen2cut/config.json`) et le réapplique à l'ouverture de session.
+   Les découpages **récursifs** (ex. : écran coupé en 2, puis seulement la moitié droite recoupée en 2)
+   s'affichent dans l'aperçu ; la ligne indique « découpage personnalisé : N écrans » et **Éditer…**
+   ouvre screen2cut sur cet écran pour les modifier.
 
-> État : testé sur XFCE 4.20 / Debian 13 / X11 — aperçu, ligne de réglage (détection du découpage
-> existant) et traduction française vérifiés ; les boutons Découper / Fusionner appellent le même CLI
-> `screen2cut` que celui testé en ligne de commande. Wayland non géré (le patch est désactivé hors X11).
+> État : testé sur XFCE 4.20 / Debian 13 / X11 — aperçu (y compris découpage récursif), détection du
+> découpage existant et traduction française vérifiés visuellement. Les clics sur Découper / Fusionner /
+> Éditer… n'ont pas pu être testés automatiquement : ils appellent le CLI `screen2cut`, testé à part.
+> Wayland non géré (le patch est désactivé hors X11).
 
-## Installation (sans root, dans `~/.local`)
+## Installation
 
 ```bash
 sudo apt-get build-dep xfce4-settings      # deb-src doit être activé
 git clone https://github.com/davidnurdin/screen2cut          # + cargo build --release, binaire dans le PATH
 git clone https://github.com/davidnurdin/xfce4-settings-s2c
-cd xfce4-settings-s2c && ./build.sh
+cd xfce4-settings-s2c && ./build.sh          # système (sudo) ; ./build.sh --user pour ~/.local
 ```
 
 Le script télécharge les sources Debian de la **même version** que celle installée, applique
-`patches/0001-screen2cut-virtual-screens.patch`, compile et installe `xfce4-display-settings` et son
-lanceur dans `~/.local` (ils passent devant ceux du paquet Debian ; rien n'est modifié dans `/usr`).
+`patches/0001-screen2cut-virtual-screens.patch`, compile et installe dans `/usr/local` (prioritaire sur
+`/usr`, donc pour tous les utilisateurs et pour le menu Paramètres), puis détourne
+`/usr/bin/xfce4-display-settings` vers notre version avec `dpkg-divert` : une mise à jour du paquet
+`xfce4-settings` ne l'écrase pas (l'original reste dans `/usr/bin/xfce4-display-settings.distrib`).
 
-Désinstaller : supprimer `~/.local/bin/xfce4-display-settings` et
-`~/.local/share/applications/xfce-display-settings.desktop`.
+Revenir à l'original : voir les commandes affichées en fin de `build.sh`.
 
 ## Licence
 

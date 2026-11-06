@@ -1,0 +1,444 @@
+--- a/dialogs/display-settings/main.c
++++ b/dialogs/display-settings/main.c
+@@ -54,6 +54,8 @@
+ #include <math.h>
+ #endif
+ 
++#include "s2c.h"
++
+ #define MARGIN 16
+ #define ONLY_DISPLAY_1 _("Only %s (1)")
+ #define ONLY_DISPLAY_2 _("Only %s (2)")
+@@ -1064,6 +1066,10 @@
+         display_setting_reflections_populate (settings, selected_id);
+         display_setting_scale_populate (settings, selected_id);
+         display_setting_mirror_displays_populate (settings);
++#ifdef HAVE_XRANDR
++        if (WINDOWING_IS_X11 ())
++            s2c_controls_update (settings, selected_id);
++#endif
+ 
+         /* redraw the two (old active, new active) popups */
+         if (WINDOWING_IS_X11 () || gtk_layer_is_supported ())
+@@ -1806,6 +1812,11 @@
+     GtkWidget *button;
+     GtkTreeSelection *selection;
+ 
++#ifdef HAVE_XRANDR
++    if (WINDOWING_IS_X11 ())
++        s2c_controls_new (settings, builder);
++#endif
++
+     /* Get the combobox */
+     combobox = gtk_builder_get_object (builder, "randr-outputs");
+ 
+@@ -2996,6 +3007,12 @@
+         g_free (display_num);
+     }
+ 
++#ifdef HAVE_XRANDR
++    /* screen2cut: show the virtual monitors lying inside this display */
++    if (WINDOWING_IS_X11 () && output->active)
++        s2c_paint_virtual (cr, xfce_display_settings_get_scroll_area (settings), output, x, y, w, h, scale);
++#endif
++
+     cairo_restore (cr);
+ 
+     if (pat_lin)
+--- a/po/fr.po
++++ b/po/fr.po
+@@ -2836,3 +2836,21 @@
+ #: xfsettingsd/xfsettingsd.desktop.in:13
+ msgid "settings;daemon;xfce;configuration;preferences;system;manage;"
+ msgstr "settings;daemon;xfce;configuration;preferences;system;manage;configuration;paramètres;préférences;système;gestion;"
++
++# screen2cut integration
++msgid "Virtual screens:"
++msgstr "Écrans virtuels :"
++
++msgid "Split"
++msgstr "Découper"
++
++msgid "Merge"
++msgstr "Fusionner"
++
++msgid ""
++"Split this display into several virtual screens (columns × rows). Windows, "
++"panels and maximize then treat each part as a real screen."
++msgstr ""
++"Découpe cet écran en plusieurs écrans virtuels (colonnes × lignes). Les "
++"fenêtres, les panneaux et la maximisation traitent chaque partie comme un "
++"vrai écran."
+--- /dev/null
++++ b/dialogs/display-settings/s2c.h
+@@ -0,0 +1,370 @@
++/*
++ * screen2cut integration for xfce4-display-settings (X11 only).
++ *
++ * - draws the RandR 1.5 virtual monitors inside the physical displays of the layout preview;
++ * - adds a "Virtual screens" row (columns x rows) driving the `screen2cut` helper
++ *   (https://github.com/davidnurdin/screen2cut), which also persists the split.
++ *
++ * Header-only on purpose: keeps the patch to the upstream build system at zero.
++ */
++#ifndef S2C_H
++#define S2C_H
++
++#ifdef HAVE_XRANDR
++
++#include <X11/Xlib.h>
++#include <X11/extensions/Xrandr.h>
++
++typedef struct
++{
++    gchar *name;
++    gint x, y, w, h;
++} S2cMonitor;
++
++static GList *s2c_cache = NULL;
++static gint64 s2c_cache_time = 0;
++static GtkWidget *s2c_box = NULL;
++static GtkWidget *s2c_cols = NULL;
++static GtkWidget *s2c_rows = NULL;
++static GtkWidget *s2c_merge = NULL;
++
++static void
++s2c_monitor_free (gpointer data)
++{
++    S2cMonitor *m = data;
++    g_free (m->name);
++    g_free (m);
++}
++
++static void
++s2c_invalidate (void)
++{
++    g_list_free_full (s2c_cache, s2c_monitor_free);
++    s2c_cache = NULL;
++    s2c_cache_time = 0;
++}
++
++/* RandR name of the idx-th connected output (same order as xfce-randr.c) */
++static gchar *
++s2c_output_name (guint idx)
++{
++    Display *d = gdk_x11_get_default_xdisplay ();
++    XRRScreenResources *res = XRRGetScreenResourcesCurrent (d, DefaultRootWindow (d));
++    gchar *name = NULL;
++    guint n = 0;
++    gint i;
++
++    if (res == NULL)
++        return NULL;
++    for (i = 0; i < res->noutput && name == NULL; i++)
++    {
++        XRROutputInfo *oi = XRRGetOutputInfo (d, res, res->outputs[i]);
++        if (oi != NULL)
++        {
++            if (oi->connection == RR_Connected)
++            {
++                if (n == idx)
++                    name = g_strdup (oi->name);
++                n++;
++            }
++            XRRFreeOutputInfo (oi);
++        }
++    }
++    XRRFreeScreenResources (res);
++    return name;
++}
++
++/* Virtual monitors = monitors whose name is not the name of a physical output. */
++static GList *
++s2c_virtual_monitors (void)
++{
++    Display *d;
++    XRRScreenResources *res;
++    XRRMonitorInfo *mons;
++    GPtrArray *outnames;
++    gint nmon = 0, i, j;
++    GList *list = NULL;
++
++    if (s2c_cache_time != 0 && g_get_monotonic_time () - s2c_cache_time < 500 * 1000)
++        return s2c_cache;
++    s2c_invalidate ();
++
++    d = gdk_x11_get_default_xdisplay ();
++    res = XRRGetScreenResourcesCurrent (d, DefaultRootWindow (d));
++    if (res == NULL)
++        return NULL;
++    outnames = g_ptr_array_new_with_free_func (g_free);
++    for (i = 0; i < res->noutput; i++)
++    {
++        XRROutputInfo *oi = XRRGetOutputInfo (d, res, res->outputs[i]);
++        if (oi != NULL)
++        {
++            g_ptr_array_add (outnames, g_strdup (oi->name));
++            XRRFreeOutputInfo (oi);
++        }
++    }
++    mons = XRRGetMonitors (d, DefaultRootWindow (d), True, &nmon);
++    for (i = 0; i < nmon; i++)
++    {
++        gchar *name = XGetAtomName (d, mons[i].name);
++        gboolean physical = FALSE;
++        for (j = 0; name != NULL && j < (gint) outnames->len; j++)
++            if (g_strcmp0 (name, g_ptr_array_index (outnames, j)) == 0)
++                physical = TRUE;
++        if (name != NULL && !physical)
++        {
++            S2cMonitor *m = g_new0 (S2cMonitor, 1);
++            m->name = g_strdup (name);
++            m->x = mons[i].x;
++            m->y = mons[i].y;
++            m->w = mons[i].width;
++            m->h = mons[i].height;
++            list = g_list_append (list, m);
++        }
++        if (name != NULL)
++            XFree (name);
++    }
++    if (mons != NULL)
++        XRRFreeMonitors (mons);
++    g_ptr_array_free (outnames, TRUE);
++    XRRFreeScreenResources (res);
++    s2c_cache = list;
++    s2c_cache_time = g_get_monotonic_time ();
++    return s2c_cache;
++}
++
++/* Paint the virtual monitors lying inside the display `output` (preview coordinates x,y,w,h). */
++static void
++s2c_paint_virtual (cairo_t *cr,
++                   GtkWidget *widget,
++                   XfceOutput *output,
++                   double x,
++                   double y,
++                   int w,
++                   int h,
++                   double scale)
++{
++    GList *l;
++    static const double dashes[] = { 4.0, 3.0 };
++
++    for (l = s2c_virtual_monitors (); l != NULL; l = l->next)
++    {
++        S2cMonitor *m = l->data;
++        double rx, ry, rw, rh;
++        PangoLayout *layout;
++        PangoRectangle ink, logical;
++
++        if (m->x < output->x - 1 || m->y < output->y - 1
++            || m->x + m->w > output->x + w + 1 || m->y + m->h > output->y + h + 1)
++            continue;
++        /* a monitor covering the whole display is not a split */
++        if (m->w >= w - 1 && m->h >= h - 1)
++            continue;
++
++        rx = x + (m->x - output->x) * scale;
++        ry = y + (m->y - output->y) * scale;
++        rw = m->w * scale;
++        rh = m->h * scale;
++
++        cairo_save (cr);
++        cairo_rectangle (cr, rx + 0.5, ry + 0.5, rw - 1, rh - 1);
++        cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.10);
++        cairo_fill_preserve (cr);
++        cairo_set_dash (cr, dashes, 2, 0);
++        cairo_set_line_width (cr, 1.5);
++        cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 0.9);
++        cairo_stroke (cr);
++        cairo_restore (cr);
++
++        layout = gtk_widget_create_pango_layout (widget, m->name);
++        {
++            PangoFontDescription *fd = pango_font_description_from_string ("Sans 8");
++            pango_layout_set_font_description (layout, fd);
++            pango_font_description_free (fd);
++        }
++        pango_layout_set_width (layout, MAX (rw - 8, 10) * PANGO_SCALE);
++        pango_layout_set_ellipsize (layout, PANGO_ELLIPSIZE_END);
++        pango_layout_get_pixel_extents (layout, &ink, &logical);
++        cairo_save (cr);
++        cairo_move_to (cr, rx + 5, ry + 4);
++        cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 0.5);
++        pango_cairo_show_layout (cr, layout);
++        cairo_move_to (cr, rx + 4, ry + 3);
++        cairo_set_source_rgba (cr, 1.0, 1.0, 1.0, 1.0);
++        pango_cairo_show_layout (cr, layout);
++        cairo_restore (cr);
++        g_object_unref (layout);
++    }
++}
++
++/* ---- controls ---- */
++
++static void
++s2c_run (const gchar *a, const gchar *b, const gchar *c, const gchar *d)
++{
++    const gchar *argv[7] = { "screen2cut", a, b, c, d, NULL, NULL };
++    GError *error = NULL;
++    gchar *err_out = NULL;
++    gint status = 0;
++
++    if (!g_spawn_sync (NULL, (gchar **) argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL,
++                       NULL, NULL, NULL, &err_out, &status, &error))
++    {
++        g_warning ("screen2cut: %s", error->message);
++        g_error_free (error);
++    }
++    g_free (err_out);
++}
++
++static void
++s2c_controls_update (XfceDisplaySettings *settings,
++                     guint output_id)
++{
++    XfceOutput *output = NULL;
++    GList *l, *outputs;
++    GArray *xs, *ys;
++    gint cols = 1, rows = 1, w = 0, h = 0, i;
++
++    if (s2c_box == NULL)
++        return;
++
++    outputs = xfce_display_settings_get_outputs (settings);
++    l = g_list_nth (outputs, output_id);
++    if (l != NULL)
++        output = l->data;
++    gtk_widget_set_sensitive (s2c_box, output != NULL && output->active);
++    if (output == NULL || !output->active)
++        return;
++
++    w = output->mode->width;
++    h = output->mode->height;
++    if (output->scale > 0 && output->scale != 1.0)
++    {
++        w = round (w / output->scale);
++        h = round (h / output->scale);
++    }
++    xs = g_array_new (FALSE, FALSE, sizeof (gint));
++    ys = g_array_new (FALSE, FALSE, sizeof (gint));
++    for (l = s2c_virtual_monitors (); l != NULL; l = l->next)
++    {
++        S2cMonitor *m = l->data;
++        gboolean found;
++        gint v;
++        if (m->x < output->x - 1 || m->y < output->y - 1 || m->x + m->w > output->x + w + 1
++            || m->y + m->h > output->y + h + 1 || (m->w >= w - 1 && m->h >= h - 1))
++            continue;
++        found = FALSE;
++        for (i = 0; i < (gint) xs->len; i++)
++            if (g_array_index (xs, gint, i) == m->x)
++                found = TRUE;
++        if (!found)
++        {
++            v = m->x;
++            g_array_append_val (xs, v);
++        }
++        found = FALSE;
++        for (i = 0; i < (gint) ys->len; i++)
++            if (g_array_index (ys, gint, i) == m->y)
++                found = TRUE;
++        if (!found)
++        {
++            v = m->y;
++            g_array_append_val (ys, v);
++        }
++    }
++    if (xs->len > 0)
++        cols = xs->len;
++    if (ys->len > 0)
++        rows = ys->len;
++    g_array_free (xs, TRUE);
++    g_array_free (ys, TRUE);
++    gtk_spin_button_set_value (GTK_SPIN_BUTTON (s2c_cols), cols);
++    gtk_spin_button_set_value (GTK_SPIN_BUTTON (s2c_rows), rows);
++    gtk_widget_set_sensitive (s2c_merge, cols * rows > 1);
++}
++
++static void
++s2c_refresh_ui (XfceDisplaySettings *settings)
++{
++    s2c_invalidate ();
++    s2c_controls_update (settings, xfce_display_settings_get_selected_output_id (settings));
++    foo_scroll_area_invalidate (FOO_SCROLL_AREA (xfce_display_settings_get_scroll_area (settings)));
++}
++
++static void
++s2c_split_clicked (GtkButton *button,
++                   XfceDisplaySettings *settings)
++{
++    gchar *name = s2c_output_name (xfce_display_settings_get_selected_output_id (settings));
++    gchar *c = g_strdup_printf ("%d", gtk_spin_button_get_value_as_int (GTK_SPIN_BUTTON (s2c_cols)));
++    gchar *r = g_strdup_printf ("%d", gtk_spin_button_get_value_as_int (GTK_SPIN_BUTTON (s2c_rows)));
++
++    if (name != NULL)
++    {
++        s2c_run ("--grid", name, c, r);
++        /* let xfwm4 & co. notice the new monitors, then redraw */
++        g_usleep (300 * 1000);
++        s2c_refresh_ui (settings);
++    }
++    g_free (name);
++    g_free (c);
++    g_free (r);
++}
++
++static void
++s2c_merge_clicked (GtkButton *button,
++                   XfceDisplaySettings *settings)
++{
++    gchar *name = s2c_output_name (xfce_display_settings_get_selected_output_id (settings));
++
++    if (name != NULL)
++    {
++        s2c_run ("--ungrid", name, NULL, NULL);
++        g_usleep (300 * 1000);
++        s2c_refresh_ui (settings);
++    }
++    g_free (name);
++}
++
++static void
++s2c_controls_new (XfceDisplaySettings *settings,
++                  GtkBuilder *builder)
++{
++    GtkWidget *grid = GTK_WIDGET (gtk_builder_get_object (builder, "table1"));
++    GtkWidget *label, *split;
++
++    if (grid == NULL)
++        return;
++
++    gtk_grid_insert_row (GTK_GRID (grid), 8);
++
++    s2c_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
++    gtk_widget_set_margin_top (s2c_box, 6);
++    gtk_widget_set_tooltip_text (s2c_box,
++                                 _("Split this display into several virtual screens (columns × rows). "
++                                   "Windows, panels and maximize then treat each part as a real screen."));
++
++    label = gtk_label_new_with_mnemonic (_("Virtual screens:"));
++    gtk_label_set_xalign (GTK_LABEL (label), 0.0);
++    gtk_box_pack_start (GTK_BOX (s2c_box), label, FALSE, FALSE, 0);
++
++    s2c_cols = gtk_spin_button_new_with_range (1, 12, 1);
++    s2c_rows = gtk_spin_button_new_with_range (1, 12, 1);
++    gtk_box_pack_start (GTK_BOX (s2c_box), s2c_cols, FALSE, FALSE, 0);
++    gtk_box_pack_start (GTK_BOX (s2c_box), gtk_label_new ("×"), FALSE, FALSE, 0);
++    gtk_box_pack_start (GTK_BOX (s2c_box), s2c_rows, FALSE, FALSE, 0);
++
++    split = gtk_button_new_with_label (_("Split"));
++    g_signal_connect (split, "clicked", G_CALLBACK (s2c_split_clicked), settings);
++    gtk_box_pack_start (GTK_BOX (s2c_box), split, FALSE, FALSE, 0);
++
++    s2c_merge = gtk_button_new_with_label (_("Merge"));
++    g_signal_connect (s2c_merge, "clicked", G_CALLBACK (s2c_merge_clicked), settings);
++    gtk_box_pack_start (GTK_BOX (s2c_box), s2c_merge, FALSE, FALSE, 0);
++
++    gtk_grid_attach (GTK_GRID (grid), s2c_box, 0, 8, 3, 1);
++    gtk_widget_show_all (s2c_box);
++}
++
++#endif /* HAVE_XRANDR */
++#endif /* S2C_H */

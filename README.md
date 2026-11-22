@@ -1,3 +1,6 @@
+> **⚠️ This repository has moved to [https://git.jumphp.net/jumphp/xfce4-settings-s2c](https://git.jumphp.net/jumphp/xfce4-settings-s2c)** — it is archived here (read-only) and no longer updated.
+> **⚠️ Ce dépôt a déménagé sur [https://git.jumphp.net/jumphp/xfce4-settings-s2c](https://git.jumphp.net/jumphp/xfce4-settings-s2c)** — il est archivé ici (lecture seule) et n'est plus mis à jour.
+
 # xfce4-settings-s2c
 
 Version **patchée de « Affichage » de XFCE** (`xfce4-display-settings`, xfce4-settings 4.20.1 / Debian 13)
